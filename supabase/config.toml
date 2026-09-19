@@ -1,0 +1,8 @@
+project_id = "gms-data-web"
+
+[auth]
+enable_signup = false
+
+[functions.portal]
+verify_jwt = false
+# JWT authenticated manually using auth.getUser; device routes use signed single-use challenges.

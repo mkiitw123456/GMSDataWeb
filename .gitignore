@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env*
+!.env.example
+.vercel/
+supabase/.temp/
+*.secret
+private/
+qa/
+qa-screen.html
+*.tsbuildinfo
