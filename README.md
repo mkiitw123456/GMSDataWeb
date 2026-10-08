@@ -20,6 +20,20 @@
 
 ## 安全與計量
 
+### 2026-10-08：帳號與授權碼管理
+
+- 新增會員只填「登入帳號、顯示名稱、密碼」，不用提供 Email。帳號 1–40 字、中英文／數字／`_.-`，NFKC 正規化且英文不分大小寫，資料庫唯一索引防重複。
+- 擁有者可編輯一般使用者帳號、名稱及密碼；新密碼留空代表不修改。改名不改 UUID，已有授權碼及統計繼續屬於同一使用者。擁有者自己的登入方式不在這個介面修改。
+- 舊 Email 帳號不強制遷移，仍可用原本 Email 登入。一般會員在後台設定帳號／新密碼後，請改用該登入帳號。
+- 密碼依產品需求允許 1–200 字元，但單字元密碼極易被猜中，**不建議使用**。公開 `auth.login` 每 IP 10 次／分鐘、每帳號 5 次／分鐘（固定視窗，不是不可暴力破解保證）。前端不保留密碼、不記錄請求密碼。
+- Supabase 仍管理登入 session 與密碼雜湊；新帳號使用隨機 UUID 的內部 `.invalid` Email 識別，不寄信、不需要使用者郵箱。伺服器將原密碼以 `LICENSE_PEPPER`、UUID、獨立用途字串做 HMAC，再交給 Supabase；不把原密碼補字元或只在前端忽略最短限制。Supabase 只儲存雜湊。**請勿更換或遺失 LICENSE_PEPPER**，否則既有授權碼及新版網站密碼都受影響。HMAC 不會讓弱密碼變成強密碼。
+- 刪除授權碼有二次確認；交易內刪除授權、challenge、device session，保留安全稽核與歷史統計。桌面程式下次向後端驗證（正常約 30 秒）會被拒絕。刪除不是停用，不能復原成原碼。
+- 新管理 API 必須有擁有者的網站登入 JWT；設備 token 不得呼叫管理 API。密碼更新與 profile 更新跨 Auth/資料庫 API，若 profile 儲存失敗但密碼已變更，會明確回傳部分成功訊息，不假裝全部失敗。
+
+更新既有雲端時：先備份／比對現行 portal 原始碼，再只執行 `supabase/migrations/202610080001_account_management.sql`（一次；不要重跑初始 SQL），部署 `portal`，最後部署 Vercel 前端。新增欄位 nullable，不修改任何既有密碼或授權碼。若原專案透過 SQL Editor 建立而没有 CLI migration history，請勿直接對其執行會重跑初始建表的 `db push`。
+
+驗證：`npm test`、`npm run build`、`deno check --node-modules-dir=none --no-lock supabase/functions/portal/index.ts`。後端單元測試使用假的 Auth/PostgREST，不代表雲端連線已通過；上線時另做臨時帳號的真實登入／改密碼／刪碼撤銷測試。
+
 資料表全面RLS/預設deny；前端只能透過API讀取經伺服器挑選的資料。一般登入者看全部統計，不看設備、Email或授權資料。無公開註冊；即使有人建立Auth帳號，沒有有效profile仍不能用服務。管理員由伺服器role決定，不信任user_metadata。
 
 授權碼為32bytes隨機值，伺服器只存帶pepper的HMAC。設備Ed25519簽章、一次性2分鐘challenge、15分鐘設備session；首次綁定row lock，拒絕跨設備重用。MAC與MachineGuid摘要輔助綁定，Windows DPAPI保護本機private key。這不是不可破解DRM。備份pepper，丟失後舊碼不能再啟用。

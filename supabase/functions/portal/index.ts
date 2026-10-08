@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { accountName, passwordValue, derivePassword } from "./credentials.ts";
 
 // Service key stays here, never in VITE_* or desktop builds.
 const db = createClient(
@@ -7,6 +8,39 @@ const db = createClient(
   { auth: { persistSession: false, autoRefreshToken: false } },
 );
 const encoder = new TextEncoder();
+// Never sign a user in on the shared service-role client: doing so would replace
+// its Authorization header for subsequent requests in the same Edge isolate.
+const loginClient = () =>
+  createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    },
+  );
+function account(v: unknown) {
+  try {
+    return accountName(v);
+  } catch (e) {
+    throw new Failure((e as Error).message);
+  }
+}
+function password(v: unknown) {
+  try {
+    return passwordValue(v);
+  } catch (e) {
+    throw new Failure((e as Error).message);
+  }
+}
+async function credential(value: string, id: string) {
+  const pepper = Deno.env.get("LICENSE_PEPPER");
+  if (!pepper) throw new Failure("登入服務尚未配置", 503);
+  return await derivePassword(value, id, pepper);
+}
 class Failure extends Error {
   constructor(
     message: string,
@@ -68,7 +102,7 @@ async function profile(id: string) {
   const p = check(
     await db
       .from("profiles")
-      .select("id,name,role,enabled")
+      .select("id,name,username,role,enabled")
       .eq("id", id)
       .maybeSingle(),
   );
@@ -100,7 +134,7 @@ async function device(token: unknown) {
       .eq("id", s.license_id)
       .single(),
   );
-  if (!l.enabled || l.generation !== s.generation)
+  if (!l || !l.enabled || l.generation !== s.generation)
     throw new Failure("授權已撤銷", 403);
   return await profile(l.user_id);
 }
@@ -231,6 +265,48 @@ Deno.serve(async (req) => {
     const action = string(p.action, 40);
     const ip = req.headers.get("x-forwarded-for")?.split(",")[0] || "unknown";
     await limit(`ip:${await sha(ip)}`, 120);
+    if (action === "auth.login") {
+      const login = string(p.username, 254).normalize("NFKC").toLowerCase();
+      const supplied = password(p.password);
+      // Account-wide limit also applies across IPs; do not expose whether it exists.
+      await limit(`login-ip:${await sha(ip)}`, 10);
+      await limit(`login-account:${await sha(login)}`, 5);
+      const client = loginClient();
+      let email: string;
+      let secret = supplied;
+      if (login.includes("@")) {
+        // Legacy email login remains available; new accounts never need an email.
+        email = login;
+      } else {
+        const target = check(
+          await db
+            .from("profiles")
+            .select("id,enabled")
+            .eq("username", account(login))
+            .maybeSingle(),
+        );
+        if (!target?.enabled)
+          throw new Failure("帳號或密碼錯誤，或帳號已停用", 401);
+        const { data, error } = await db.auth.admin.getUserById(target.id);
+        if (error || !data.user?.email)
+          throw new Failure("帳號或密碼錯誤，或帳號已停用", 401);
+        email = data.user.email;
+        if (data.user.app_metadata?.portal_password === "hmac-v1")
+          secret = await credential(supplied, target.id);
+      }
+      const { data, error } = await client.auth.signInWithPassword({
+        email,
+        password: secret,
+      });
+      if (error || !data.session)
+        throw new Failure("帳號或密碼錯誤，或帳號已停用", 401);
+      await profile(data.user.id);
+      // Return only the standard session tokens; never expose the derived password.
+      return response({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      });
+    }
     if (action === "device.activate") {
       await limit(`activate:${await sha(ip)}`, 8);
       const publicKey = string(p.public_key, 44);
@@ -367,7 +443,8 @@ Deno.serve(async (req) => {
       );
       return response({ id });
     }
-    if (who.role !== "owner") throw new Failure("只有擁有者可執行此操作", 403);
+    if (who.role !== "owner" || p.device_token)
+      throw new Failure("只有擁有者的網站登入可執行此操作", 403);
     if (action === "admin.list") {
       const [users, licenses, versions] = await Promise.all([
         db.from("profiles").select("*").order("name").limit(1000),
@@ -384,7 +461,7 @@ Deno.serve(async (req) => {
       ]);
       return response({
         users: check(users),
-        licenses: check(licenses).map(({ public_key, ...l }) => ({
+        licenses: (check(licenses) || []).map(({ public_key, ...l }) => ({
           ...l,
           bound: !!public_key,
         })),
@@ -392,23 +469,81 @@ Deno.serve(async (req) => {
       });
     }
     if (action === "admin.createUser") {
-      const password = string(p.password, 200);
-      if (password.length < 12) throw new Failure("初始密碼至少12字元");
+      const supplied = password(p.password);
+      const username = account(p.username);
       const name = string(p.name, 60);
+      const exists = check(
+        await db
+          .from("profiles")
+          .select("id")
+          .eq("username", username)
+          .maybeSingle(),
+      );
+      if (exists) throw new Failure("登入帳號已被使用");
+      const id = crypto.randomUUID();
       const { data, error } = await db.auth.admin.createUser({
-        email: string(p.email, 254),
-        password,
+        id,
+        email: `${id}@accounts.gms.invalid`,
+        password: await credential(supplied, id),
         email_confirm: true,
+        app_metadata: { portal_password: "hmac-v1" },
       });
-      if (error || !data.user)
-        throw new Failure("帳號建立失敗，請確認Email尚未被使用");
+      if (error || !data.user) throw new Failure("帳號建立失敗，請稍後重試");
       const created = await db
         .from("profiles")
-        .insert({ id: data.user.id, name, role: "member" });
+        .insert({ id: data.user.id, name, username, role: "member" });
       if (created.error) {
         await db.auth.admin.deleteUser(data.user.id);
         throw new Failure("帳號資料建立失敗");
       }
+      return response({ ok: true });
+    }
+    if (action === "admin.updateUser") {
+      const id = uuid(p.id);
+      const username = account(p.username);
+      const name = string(p.name, 60);
+      const target = check(
+        await db.from("profiles").select("id,role").eq("id", id).single(),
+      );
+      // Owner credentials are deliberately kept out of the member-management editor.
+      if (!target) throw new Failure("找不到使用者", 404);
+      if (target.role === "owner")
+        throw new Failure("此介面只修改一般使用者，擁有者登入方式保持不變");
+      const duplicate = check(
+        await db
+          .from("profiles")
+          .select("id")
+          .eq("username", username)
+          .neq("id", id)
+          .maybeSingle(),
+      );
+      if (duplicate) throw new Failure("登入帳號已被使用");
+      const supplied =
+        p.password === "" || p.password === undefined
+          ? null
+          : password(p.password);
+      if (supplied !== null) {
+        const { data, error } = await db.auth.admin.getUserById(id);
+        if (error || !data.user) throw new Failure("找不到帳號");
+        const changed = await db.auth.admin.updateUserById(id, {
+          password: await credential(supplied, id),
+          app_metadata: {
+            ...data.user.app_metadata,
+            portal_password: "hmac-v1",
+          },
+        });
+        if (changed.error) throw new Failure("密碼更新失敗，帳號資料未修改");
+      }
+      const updated = await db
+        .from("profiles")
+        .update({ username, name })
+        .eq("id", id);
+      if (updated.error)
+        throw new Failure(
+          supplied !== null
+            ? "密碼已更新，但帳號／名稱儲存失敗（可能帳號重複）。請保留新密碼並重新儲存帳號。"
+            : "帳號／名稱儲存失敗，請確認帳號未重複後重試",
+        );
       return response({ ok: true });
     }
     if (action === "admin.setUser") {
@@ -416,6 +551,7 @@ Deno.serve(async (req) => {
       const target = check(
         await db.from("profiles").select("role").eq("id", id).single(),
       );
+      if (!target) throw new Failure("找不到使用者", 404);
       if (target.role === "owner")
         throw new Failure("不能透過此介面停用擁有者");
       check(
@@ -431,13 +567,11 @@ Deno.serve(async (req) => {
       await profile(uid);
       const code = `GMS-${random()}`;
       check(
-        await db
-          .from("licenses")
-          .insert({
-            user_id: uid,
-            code_hash: await hashCode(code),
-            suffix: code.slice(-6),
-          }),
+        await db.from("licenses").insert({
+          user_id: uid,
+          code_hash: await hashCode(code),
+          suffix: code.slice(-6),
+        }),
       );
       return response({ code });
     }
@@ -459,6 +593,12 @@ Deno.serve(async (req) => {
           p_actor: who.id,
           p_reason: string(p.reason, 300),
         }),
+      );
+      return response({ ok: true });
+    }
+    if (action === "admin.deleteLicense") {
+      check(
+        await db.rpc("delete_license", { p_id: uuid(p.id), p_actor: who.id }),
       );
       return response({ ok: true });
     }

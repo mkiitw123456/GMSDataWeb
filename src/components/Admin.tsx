@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Plus, RefreshCw, Upload } from "lucide-react";
+import { Plus, RefreshCw, Upload, Pencil, Trash2 } from "lucide-react";
 import { api, demo, type License, type Profile } from "../lib/api";
 import { number, parseLevels } from "../lib/math";
 import { Dialog, Field, Notice } from "./UI";
@@ -19,6 +19,8 @@ export function Admin({ page }: { page: AdminPage }) {
     [error, setError] = useState(""),
     [message, setMessage] = useState(""),
     [creating, setCreating] = useState(false),
+    [editing, setEditing] = useState<Profile | null>(null),
+    [deleting, setDeleting] = useState<License | null>(null),
     [code, setCode] = useState("");
   async function load() {
     setBusy(true);
@@ -43,6 +45,9 @@ export function Admin({ page }: { page: AdminPage }) {
   useEffect(() => {
     void load();
     setCreating(false);
+    setEditing(null);
+    setDeleting(null);
+    setError("");
     setMessage("");
   }, [page]);
   async function action(name: string, payload: Record<string, unknown>) {
@@ -56,7 +61,13 @@ export function Admin({ page }: { page: AdminPage }) {
       const result = await api<{ code?: string }>(name, payload);
       if (result.code) setCode(result.code);
       setCreating(false);
-      setMessage("已儲存。");
+      setEditing(null);
+      setDeleting(null);
+      setMessage(
+        name === "admin.deleteLicense"
+          ? "授權碼已刪除，該碼的設備連線已撤銷；歷史統計保留。"
+          : "已儲存。",
+      );
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -68,8 +79,12 @@ export function Admin({ page }: { page: AdminPage }) {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.currentTarget));
     void action(
-      page === "users" ? "admin.createUser" : "admin.createLicense",
-      f,
+      editing
+        ? "admin.updateUser"
+        : page === "users"
+          ? "admin.createUser"
+          : "admin.createLicense",
+      editing ? { ...f, id: editing.id } : f,
     );
   }
   return (
@@ -90,7 +105,14 @@ export function Admin({ page }: { page: AdminPage }) {
         <header className="panel-title">
           <h1>{labels[page]}</h1>
           {page !== "experience" && (
-            <button className="primary" onClick={() => setCreating(true)}>
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() => {
+                setError("");
+                setCreating(true);
+              }}
+            >
               <Plus size={18} />
               {page === "users" ? "新增帳號" : "建立授權碼"}
             </button>
@@ -101,6 +123,7 @@ export function Admin({ page }: { page: AdminPage }) {
             <table>
               <thead>
                 <tr>
+                  <th>登入帳號</th>
                   <th>顯示名稱</th>
                   <th>角色</th>
                   <th>狀態</th>
@@ -110,22 +133,35 @@ export function Admin({ page }: { page: AdminPage }) {
               <tbody>
                 {users.map((u) => (
                   <tr key={u.id}>
+                    <td>{u.username || "舊帳號（Email 登入）"}</td>
                     <td>{u.name}</td>
                     <td>{u.role === "owner" ? "擁有者" : "一般使用者"}</td>
                     <td>{u.enabled ? "啟用" : "停用"}</td>
                     <td>
                       {u.role !== "owner" && (
-                        <button
-                          disabled={busy}
-                          onClick={() =>
-                            action("admin.setUser", {
-                              id: u.id,
-                              enabled: !u.enabled,
-                            })
-                          }
-                        >
-                          {u.enabled ? "停用" : "啟用"}
-                        </button>
+                        <div className="actions">
+                          <button
+                            disabled={busy}
+                            onClick={() => {
+                              setError("");
+                              setEditing(u);
+                            }}
+                          >
+                            <Pencil size={16} />
+                            編輯帳號／密碼
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() =>
+                              action("admin.setUser", {
+                                id: u.id,
+                                enabled: !u.enabled,
+                              })
+                            }
+                          >
+                            {u.enabled ? "停用" : "啟用"}
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -172,13 +208,24 @@ export function Admin({ page }: { page: AdminPage }) {
                           disabled={!l.bound || busy}
                           onClick={() => {
                             const reason = prompt(
-                              "解除设备綁定會使舊設備失效。請填寫原因：",
+                              "解除設備綁定會使舊設備失效。請填寫原因：",
                             );
                             if (reason?.trim())
                               void action("admin.unbind", { id: l.id, reason });
                           }}
                         >
                           解除綁定
+                        </button>
+                        <button
+                          className="danger"
+                          disabled={busy}
+                          onClick={() => {
+                            setError("");
+                            setDeleting(l);
+                          }}
+                        >
+                          <Trash2 size={16} />
+                          刪除
                         </button>
                       </div>
                     </td>
@@ -202,29 +249,67 @@ export function Admin({ page }: { page: AdminPage }) {
           )
         )}
       </section>
-      {creating && (
+      {(creating || editing) && (
         <Dialog
-          title={page === "users" ? "新增使用者" : "建立授權碼"}
-          close={() => setCreating(false)}
+          title={
+            editing
+              ? "編輯使用者"
+              : page === "users"
+                ? "新增使用者"
+                : "建立授權碼"
+          }
+          close={() => {
+            if (!busy) {
+              setCreating(false);
+              setEditing(null);
+            }
+          }}
         >
           <form onSubmit={submit} className="form-stack">
+            {error && <Notice error>{error}</Notice>}
             {page === "users" ? (
               <>
+                <Field label="登入帳號">
+                  <input
+                    name="username"
+                    required
+                    maxLength={40}
+                    defaultValue={editing?.username || ""}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                  />
+                </Field>
+                <small className="muted">
+                  不用電子郵件。帳號限 1–40
+                  字，中英文、數字、底線、點或連字號；英文字母不分大小寫。
+                </small>
                 <Field label="顯示名稱">
-                  <input name="name" required maxLength={60} />
+                  <input
+                    name="name"
+                    required
+                    maxLength={60}
+                    defaultValue={editing?.name || ""}
+                  />
                 </Field>
-                <Field label="電子郵件">
-                  <input name="email" type="email" required />
-                </Field>
-                <Field label="初始密碼（至少12字元）">
+                <Field
+                  label={
+                    editing ? "新密碼（留空不變）" : "初始密碼（至少 1 字元）"
+                  }
+                >
                   <input
                     name="password"
                     type="password"
-                    required
-                    minLength={12}
+                    required={!editing}
+                    minLength={1}
+                    maxLength={200}
                     autoComplete="new-password"
                   />
                 </Field>
+                <small className="muted">
+                  可使用 1
+                  字元密碼，但非常容易被猜中，建議使用較長且不重複的密碼。修改後請使用這裡的登入帳號登入。
+                </small>
               </>
             ) : (
               <Field label="授權使用者">
@@ -241,9 +326,44 @@ export function Admin({ page }: { page: AdminPage }) {
               </Field>
             )}
             <button className="primary" disabled={busy}>
-              {busy ? "處理中…" : "確認建立"}
+              {busy ? "處理中…" : editing ? "儲存修改" : "確認建立"}
             </button>
           </form>
+        </Dialog>
+      )}
+      {deleting && (
+        <Dialog
+          title="刪除授權碼"
+          close={() => {
+            if (!busy) setDeleting(null);
+          }}
+        >
+          <div className="form-stack">
+            {error && <Notice error>{error}</Notice>}
+            <p>
+              確定刪除「
+              {users.find((u) => u.id === deleting.user_id)?.name || "使用者"}
+              」的授權碼 <strong>•••• {deleting.suffix}</strong>？
+            </p>
+            <p className="muted">
+              刪除無法復原，該碼不能再登入。正在使用的設備會在下次授權檢查時登出（正常連線下約
+              30 秒內）。使用者帳號及歷史統計不會刪除。
+            </p>
+            <div className="actions">
+              <button disabled={busy} onClick={() => setDeleting(null)}>
+                取消
+              </button>
+              <button
+                className="danger"
+                disabled={busy}
+                onClick={() =>
+                  void action("admin.deleteLicense", { id: deleting.id })
+                }
+              >
+                {busy ? "刪除中…" : "確認刪除"}
+              </button>
+            </div>
+          </div>
         </Dialog>
       )}
       {code && (

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { supabase } from "../lib/api";
+import { api, supabase } from "../lib/api";
 import { Field, Notice } from "./UI";
 export function Login() {
   const [error, setError] = useState(""),
@@ -11,10 +11,14 @@ export function Login() {
     setError("");
     const fd = new FormData(e.currentTarget);
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: String(fd.get("email")),
-        password: String(fd.get("password")),
-      });
+      const tokens = await api<{ access_token: string; refresh_token: string }>(
+        "auth.login",
+        {
+          username: String(fd.get("username")),
+          password: String(fd.get("password")),
+        },
+      );
+      const { error } = await supabase.auth.setSession(tokens);
       if (error) throw error;
     } catch (e) {
       setError((e as Error).message);
@@ -32,15 +36,28 @@ export function Login() {
         <p className="muted">使用管理員為你建立的帳號。</p>
         {!supabase && <Notice>尚未連接雲端服務，登入功能暫不可用。</Notice>}
         {error && <Notice error>{error}</Notice>}
-        <Field label="電子郵件">
-          <input name="email" type="email" autoComplete="username" required />
+        <Field label="登入帳號">
+          <input
+            name="username"
+            type="text"
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+            maxLength={254}
+          />
         </Field>
+        <small className="muted">
+          新帳號不需要 Email；舊帳號仍可輸入原本的 Email。
+        </small>
         <Field label="密碼">
           <input
             name="password"
             type="password"
             autoComplete="current-password"
             required
+            minLength={1}
+            maxLength={200}
           />
         </Field>
         <button className="primary" disabled={!supabase || busy}>

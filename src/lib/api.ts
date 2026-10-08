@@ -27,6 +27,7 @@ export async function api<T>(
 export type Profile = {
   id: string;
   name: string;
+  username?: string | null;
   role: "owner" | "member";
   enabled: boolean;
 };

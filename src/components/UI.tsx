@@ -45,7 +45,13 @@ export function Dialog({
     return () => ref.current?.close();
   }, []);
   return (
-    <dialog ref={ref} onCancel={close}>
+    <dialog
+      ref={ref}
+      onCancel={(event) => {
+        event.preventDefault();
+        close();
+      }}
+    >
       <header>
         <h2>{title}</h2>
         <button aria-label="關閉" className="icon" onClick={close}>

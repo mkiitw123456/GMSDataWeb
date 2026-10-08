@@ -347,6 +347,13 @@ tbody tr:hover td {
 .primary:hover {
   background: #95f2ce;
 }
+.danger {
+  color: #ffb8c4;
+  border-color: #693947;
+}
+.danger:hover {
+  background: #301b25;
+}
 .pagination {
   border-top: 1px solid var(--line);
   display: flex;
