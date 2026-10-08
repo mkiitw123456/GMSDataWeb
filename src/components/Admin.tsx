@@ -15,7 +15,7 @@ export function Admin({ page }: { page: AdminPage }) {
     [versions, setVersions] = useState<
       { id: string; name: string; created_at: string }[]
     >([]),
-    [busy, setBusy] = useState(false),
+    [busy, setBusy] = useState(true),
     [error, setError] = useState(""),
     [message, setMessage] = useState(""),
     [creating, setCreating] = useState(false),

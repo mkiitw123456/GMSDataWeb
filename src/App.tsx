@@ -141,7 +141,7 @@ export function App() {
           {page === "stats" ? (
             <Dashboard />
           ) : profile.role === "owner" ? (
-            <Admin page={page} />
+            <Admin key={page} page={page} />
           ) : null}
         </Suspense>
       </main>
